@@ -4,6 +4,7 @@ from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
 from app.services.groq_service import GroqService
 from app.models.message import MessageRole
+from app.prompts.chat_prompt import SYSTEM_PROMPT
 
 
 class ChatService:
@@ -46,10 +47,12 @@ class ChatService:
         return self.message_repo.get_by_conversation(conversation_id)
     
     def format_messages_for_groq(self, messages: List) -> List[Dict[str, str]]:
-        return [
+        formatted_messages = [
             {"role": msg.role.value, "content": msg.content}
             for msg in messages
         ]
+        # Prepend system prompt
+        return [{"role": "system", "content": SYSTEM_PROMPT}] + formatted_messages
     
     def generate_response(
         self,
