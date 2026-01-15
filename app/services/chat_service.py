@@ -147,7 +147,9 @@ class ChatService:
         
         try:
             arguments = json.loads(tool_call.function.arguments)
-        except json.JSONDecodeError:
+            if arguments is None:
+                arguments = {}
+        except (json.JSONDecodeError, TypeError):
             arguments = {}
         
         # Get session context and create executor
@@ -190,8 +192,9 @@ class ChatService:
         
         user_id = conversation.user_id
         
-        # Add user message to history
-        self.add_message(conversation_id, MessageRole.USER, user_message)
+        if user_message:
+            # Add user message to history
+            self.add_message(conversation_id, MessageRole.USER, user_message)
         
         # Get formatted messages
         messages = self.get_conversation_messages(conversation_id)
@@ -207,83 +210,75 @@ class ChatService:
             "temperature": temperature
         }
         
-        if tools:
-            kwargs["tools"] = tools
-            # Don't set tool_choice, let it default
+        # Tools are now handled via prompt instructions in JSON mode
+        # so we don't pass tools=tools to the API
         
         try:
             response = self.groq_service.generate_chat_completion(**kwargs)
         except Exception as e:
-            # Handle Groq tool calling errors (BadRequestError with tool_use_failed)
-            error_str = str(e)
-            if "tool_use_failed" in error_str or "Failed to call a function" in error_str:
-                logger.warning(f"Groq tool calling failed, retrying without tools: {e}")
-                # Retry without tools
-                kwargs_no_tools = {
-                    "messages": formatted_messages,
-                    "model": model,
-                    "temperature": temperature
-                }
-                response = self.groq_service.generate_chat_completion(**kwargs_no_tools)
+            logger.error(f"Groq API error: {e}")
+            raise
+
+        response_content = response.choices[0].message.content
+        
+        try:
+            # Parse JSON response
+            response_json = json.loads(response_content)
+            response_type = response_json.get("type")
+            
+            if response_type == "function":
+                func_data = response_json.get("function", {})
+                function_name = func_data.get("name")
+                arguments = func_data.get("arguments", {})
+                
+                # Execute tool
+                # Create a mock tool_call object to reuse existing _execute_tool_call (or adapt it)
+                # But _execute_tool_call expects a complex object. Let's send raw args instead.
+                
+                # Get session context for execution
+                session = self.get_or_create_session(user_id)
+                executor = FunctionExecutor(self.haibot_service, session)
+                
+                # Log execution
+                logger.info(f"Executing function via JSON mode: {function_name} with args {arguments}")
+                
+                result = executor.execute(function_name, arguments)
+                
+                # Save Assistant's JSON message to DB so it appears in history
+                self.add_message(conversation_id, MessageRole.ASSISTANT, response_content)
+                
+                # Save Function Result as USER message so model sees it contextually
+                result_msg = f"Function '{function_name}' executed. Result:\n{result}"
+                self.add_message(conversation_id, MessageRole.USER, result_msg)
+                
+                # Recursive call for final response
+                return self.generate_response(
+                    conversation_id=conversation_id, 
+                    user_message=None, 
+                    model=model,
+                    temperature=temperature,
+                    enable_functions=enable_functions
+                )
+             
+            elif response_type == "message":
+                assistant_message = response_json.get("content", "")
+                tokens_used = str(response.usage.total_tokens) if hasattr(response, 'usage') else None
+                self.add_message(conversation_id, MessageRole.ASSISTANT, assistant_message, tokens_used)
+                return assistant_message
+                
             else:
-                # Re-raise other errors
-                raise
-        
-        response_message = response.choices[0].message
-        
-        # Check if LLM wants to call functions
-        if hasattr(response_message, 'tool_calls') and response_message.tool_calls:
-            # Process tool calls
-            tool_results = []
-            
-            for tool_call in response_message.tool_calls:
-                result = self._execute_tool_call(user_id, tool_call)
-                tool_results.append({
-                    "tool_call_id": tool_call.id,
-                    "role": "tool",
-                    "content": result
-                })
-            
-            # Add assistant message with tool calls to context
-            formatted_messages.append({
-                "role": "assistant",
-                "content": response_message.content or "",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "type": "function",
-                        "function": {
-                            "name": tc.function.name,
-                            "arguments": tc.function.arguments
-                        }
-                    }
-                    for tc in response_message.tool_calls
-                ]
-            })
-            
-            # Add tool results
-            for result in tool_results:
-                formatted_messages.append(result)
-            
-            # Second LLM call to generate final response (disable tools)
-            final_response = self.groq_service.generate_chat_completion(
-                messages=formatted_messages,
-                model=model,
-                temperature=temperature,
-                tools=None  # Disable tools on second call
-            )
-            
-            assistant_message = final_response.choices[0].message.content
-            tokens_used = str(final_response.usage.total_tokens) if hasattr(final_response, 'usage') else None
-        else:
-            # No function calls, use direct response
-            assistant_message = response_message.content
-            tokens_used = str(response.usage.total_tokens) if hasattr(response, 'usage') else None
-        
-        # Save assistant response
-        self.add_message(conversation_id, MessageRole.ASSISTANT, assistant_message, tokens_used)
-        
-        return assistant_message
+                # Fallback for unknown JSON structure
+                logger.warning(f"Unknown JSON structure: {response_content}")
+                assistant_message = str(response_content)
+                self.add_message(conversation_id, MessageRole.ASSISTANT, assistant_message)
+                return assistant_message
+                
+        except json.JSONDecodeError:
+            # Fallback for non-JSON response (model failed to follow instructions)
+            logger.warning(f"Failed to parse JSON response: {response_content}")
+            assistant_message = response_content
+            self.add_message(conversation_id, MessageRole.ASSISTANT, assistant_message)
+            return assistant_message
     
     def stream_response(
         self,

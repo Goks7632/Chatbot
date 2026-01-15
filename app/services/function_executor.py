@@ -71,14 +71,17 @@ class FunctionExecutor:
             elif function_name == "list_scheduled_tasks":
                 return self._list_scheduled_tasks(arguments.get("limit"))
             
-            elif function_name == "get_schedule_details":
-                return self._get_schedule_details(arguments.get("schedule_identifier", ""))
+            elif function_name == "get_available_tasks":
+                return self._get_available_tasks()
             
             elif function_name == "schedule_task":
                 return self._schedule_task(
-                    task_name=arguments.get("task_name", ""),
+                    task_id=arguments.get("task_id", ""),
                     date=arguments.get("date", ""),
-                    time=arguments.get("time", "")
+                    time=arguments.get("time", ""),
+                    priority=arguments.get("priority", "medium"),
+                    recurring=arguments.get("recurring", False),
+                    frequency=arguments.get("frequency", "daily")
                 )
             
             elif function_name == "run_task_now":
@@ -96,6 +99,15 @@ class FunctionExecutor:
             elif function_name == "get_user_profile":
                 return self._get_user_profile(arguments.get("include_details", True))
             
+            elif function_name == "create_task_run":
+                return self._create_task_run(arguments.get("schedule_id", ""))
+                
+            elif function_name == "get_task_run_by_id":
+                return self._get_task_run_by_id_wrapper(arguments.get("run_id", ""))
+                
+            elif function_name == "get_task_schedule_by_id":
+                return self._get_task_schedule_by_id_wrapper(arguments.get("schedule_id", ""))
+            
             else:
                 return f"Unknown function: {function_name}"
                 
@@ -111,7 +123,8 @@ class FunctionExecutor:
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Error: Unable to verify session. {str(e)}"
         
@@ -128,11 +141,12 @@ class FunctionExecutor:
         client_list = []
         for client in clients:
             if not client: continue  # Skip null entries
-            name = client.get("name", "Unknown")
-            email = client.get("email", "N/A")
-            status = client.get("status", "N/A")
+            name = client.get("company_name", "Unknown")
             client_id = client.get("id", "N/A")
-            client_list.append(f"- {name} (ID: {client_id}, Email: {email}, Status: {status})")
+            # Email and status are not top-level fields in this API response
+            published = client.get("published", "N/A")
+            source = client.get("source_name", "N/A")
+            client_list.append(f"- {name} (ID: {client_id}, Published: {published}, Source: {source})")
         
         return f"Found {len(clients)} clients:\n" + "\n".join(client_list)
     
@@ -142,7 +156,8 @@ class FunctionExecutor:
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Error: Unable to verify session. {str(e)}"
         
@@ -150,11 +165,11 @@ class FunctionExecutor:
             return "Please provide a client name or ID."
         
         # Try to get by ID first
-        client = self.api.get_client_by_id(client_identifier)
+        client = self.api.get_client_by_id(client_identifier, user_id=self.session.profile_id)
         
         # If not found, try searching by name
         if not client:
-            client = self.api.find_client_by_name(client_identifier)
+            client = self.api.find_client_by_name(client_identifier, user_id=self.session.profile_id)
         
         if not client:
             return f"Could not find client matching '{client_identifier}'"
@@ -182,7 +197,8 @@ class FunctionExecutor:
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Error: Unable to verify session. {str(e)}"
         
@@ -198,7 +214,7 @@ class FunctionExecutor:
             
             # Create client
             result = self.api.create_client(
-                user_id=self.session.user_id,
+                profile_id=self.session.profile_id,
                 company_name=company_name,
                 **optional_fields
             )
@@ -214,6 +230,77 @@ class FunctionExecutor:
     
     # ... (skipping client details) ...
 
+    def _get_available_tasks(self) -> str:
+        """Get list of available task templates."""
+        tasks = self.api.get_all_tasks()
+        
+        # Handle wrapped response
+        if isinstance(tasks, dict) and "data" in tasks:
+            tasks = tasks["data"]
+            
+        if not tasks:
+            return "No task templates found."
+            
+        task_list = []
+        for t in tasks:
+            if not t: continue
+            name = t.get("name", "Unknown")
+            tid = t.get("id", "N/A")
+            desc = t.get("description", "")
+            task_list.append(f"- {name} (ID: {tid}): {desc}")
+            
+        return "Available Task Templates:\n" + "\n".join(task_list)
+
+    def _schedule_task(self, task_identifier: str, date: str, time: str, priority: str = "medium", recurring: bool = False, frequency: str = "daily") -> str:
+        """Create a new task schedule."""
+        if not self.session.is_verified():
+            try:
+                result = self.api.verify_session(self.session.user_id)
+                if result:
+                   self.session.update_from_verification(result)
+            except Exception as e:
+                return f"Session error: {e}"
+        
+        if not task_identifier:
+            return "Please provide a valid task name or ID."
+
+        # Try to resolve task ID from name if needed
+        task_id = task_identifier
+        # If it doesn't look like a UUID, try to find by name
+        if len(task_identifier) < 30: 
+             tasks = self.api.get_all_tasks()
+             # Unwrap
+             if isinstance(tasks, dict) and "data" in tasks:
+                 tasks = tasks["data"]
+             
+             found = False
+             if tasks:
+                 for t in tasks:
+                     if task_identifier.lower() in t.get("name", "").lower():
+                         task_id = t.get("id")
+                         found = True
+                         break
+             
+             if not found:
+                 return f"Could not find task template matching '{task_identifier}'"
+
+        try:
+            result = self.api.create_task_schedule(
+                task_id=task_id,
+                time=time,
+                date=date,
+                profile_id=self.session.profile_id,
+                priority=priority,
+                recurring=recurring,
+                frequency=frequency
+            )
+            
+            sched_id = result.get("id", "unknown")
+            return f"Successfully scheduled task (ID: {sched_id}) for {date} at {time}."
+            
+        except Exception as e:
+            return f"Failed to schedule task: {str(e)}"
+    
     # ==================== Schedule Functions ====================
     
     def _list_scheduled_tasks(self, limit: Optional[int] = None, refresh: bool = False) -> str:
@@ -222,12 +309,17 @@ class FunctionExecutor:
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Error: Unable to verify session. {str(e)}"
         
         schedules = self.api.get_all_task_schedules(session_id=self.session.profile_id)
         
+        # Unwrap if needed
+        if isinstance(schedules, dict) and "data" in schedules:
+            schedules = schedules["data"]
+            
         if not schedules:
             return "No scheduled tasks found."
             
@@ -253,7 +345,8 @@ class FunctionExecutor:
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Error: Unable to verify session. {str(e)}"
         
@@ -300,12 +393,17 @@ class FunctionExecutor:
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Error: Unable to verify session. {str(e)}"
         
         runs = self.api.get_all_task_runs(session_id=self.session.profile_id)
         
+        # Unwrap if needed
+        if isinstance(runs, dict) and "data" in runs:
+            runs = runs["data"]
+            
         if not runs:
             return "No task runs found."
             
@@ -324,11 +422,42 @@ class FunctionExecutor:
         return f"Found {len(runs)} runs:\n" + "\n".join(run_list)
     
     def _get_task_run_status(self, run_id: str) -> str:
-        """Get task run status by ID."""
-        run = self.api.get_task_run_by_id(run_id)
+        """Get task run status by ID or Task Name."""
+        if not run_id:
+            return "Please provide a run ID or task name."
+            
+        # Handle "latest" or "last" request
+        if run_id.lower() in ["latest", "last", "current"]:
+            runs = self.api.get_all_task_runs(session_id=self.session.profile_id)
+            # Unwrap if needed
+            if isinstance(runs, dict) and "data" in runs:
+                runs = runs["data"]
+            
+            if not runs:
+                return "No task runs found."
+            # Assuming API returns sorted or we pick first
+            run = runs[0]
+            run_id = run.get("id")
+        
+        # Try to get by ID first
+        run = self.api.get_task_run_by_id(run_id, user_id=self.session.profile_id)
+        
+        # If not found, try searching by task name
+        if not run:
+            all_runs = self.api.get_all_task_runs(session_id=self.session.profile_id)
+             # Unwrap if needed
+            if isinstance(all_runs, dict) and "data" in all_runs:
+                all_runs = all_runs["data"]
+                
+            # Find first run matching the name
+            for r in all_runs:
+                task_name = r.get("task", {}).get("name", "").lower()
+                if run_id.lower() in task_name:
+                    run = r
+                    break
         
         if not run:
-            return f"Could not find task run with ID '{run_id}'"
+            return f"Could not find task run matching '{run_id}'"
         
         details = [
             f"Run ID: {run.get('id', 'N/A')}",
@@ -400,13 +529,17 @@ class FunctionExecutor:
             # Try to verify first
             try:
                 result = self.api.verify_session(self.session.user_id)
-                self.session.update_from_verification(result)
+                if result:
+                    self.session.update_from_verification(result)
             except Exception as e:
                 return f"Could not retrieve profile. Session verification failed: {str(e)}"
         
         # Now fetch the full profile
         try:
             result = self.api.verify_session(self.session.user_id)
+            if not result:
+                return "Failed to retrieve profile: valid session data not returned."
+            
             user = result.get("user", {})
             profile = user.get("profile", {})
             
@@ -427,6 +560,80 @@ class FunctionExecutor:
         except Exception as e:
             return f"Failed to retrieve profile: {str(e)}"
     
+    # ==================== Task Run Helper Functions ====================
+
+    def _create_task_run(self, schedule_id: str) -> str:
+        """Create a task run for a given schedule."""
+        if not self.session.is_verified():
+            return "Session not verified. Please provide your user ID first."
+            
+        if not schedule_id:
+            return "Please provide a schedule ID."
+            
+        try:
+            result = self.api.create_task_run(
+                schedule_id=schedule_id,
+                profile_id=self.session.profile_id
+            )
+            
+            # The API returns nested data: {success: true, data: {message: "...", taskRun: {...}}}
+            data = result.get("data", {})
+            run_obj = data.get("taskRun", {})
+            run_id = run_obj.get("id", "unknown")
+            
+            return f"Successfully triggered task run (Run ID: {run_id}). Status: {run_obj.get('status', 'unknown')}"
+        except Exception as e:
+            return f"Failed to list task run: {str(e)}"
+
+    def _get_task_run_by_id_wrapper(self, run_id: str) -> str:
+        """Get details of a specific task run by ID."""
+        if not self.session.is_verified():
+             return "Session not verified. Please provide your user ID first."
+             
+        if not run_id:
+            return "Please provide a run ID."
+            
+        try:
+            # Pass user_id for authorization
+            run = self.api.get_task_run_by_id(run_id, user_id=self.session.user_id)
+            if not run:
+                return f"Could not find task run with ID '{run_id}'"
+                
+            details = [
+                f"Run ID: {run.get('id', 'N/A')}",
+                f"Status: {run.get('status', 'N/A')}",
+                f"Started: {run.get('started_at', 'N/A')}",
+                f"Completed: {run.get('completed_at', 'N/A')}",
+                f"Result: {run.get('result', 'No result yet')}"
+            ]
+            return "\n".join(details)
+        except Exception as e:
+            return f"Error retrieving task run: {str(e)}"
+
+    def _get_task_schedule_by_id_wrapper(self, schedule_id: str) -> str:
+        """Get details of a specific task schedule by ID."""
+        if not self.session.is_verified():
+             return "Session not verified. Please provide your user ID first."
+             
+        if not schedule_id:
+            return "Please provide a schedule ID."
+            
+        try:
+            # Pass user_id for authorization
+            schedule = self.api.get_task_schedule_by_id(schedule_id, user_id=self.session.user_id)
+            if not schedule:
+                 return f"Could not find schedule with ID '{schedule_id}'"
+            
+            details = [
+                f"Schedule ID: {schedule.get('id', 'N/A')}",
+                f"Time: {schedule.get('scheduled_time', 'N/A')}",
+                f"Priority: {schedule.get('priority', 'N/A')}",
+                f"Recurring: {schedule.get('recurring', False)}"
+            ]
+            return "\n".join(details)
+        except Exception as e:
+            return f"Error retrieving schedule: {str(e)}"
+
     # ==================== Helper Methods ====================
     
     def _resolve_task_id(self, task_name: str) -> str:

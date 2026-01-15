@@ -18,6 +18,16 @@ HAIBOT_FUNCTIONS = [
             },
             "required": []
         }
+
+    },
+    {
+        "name": "get_available_tasks",
+        "description": "Get a list of all available task templates that can be scheduled.",
+        "parameters": {
+            "type": "object",
+            "properties": {},
+            "required": []
+        }
     },
     {
         "name": "get_client_details",
@@ -134,6 +144,83 @@ HAIBOT_FUNCTIONS = [
             },
             "required": []
         }
+    },
+    {
+        "name": "create_task_run",
+        "description": "Trigger a new run for a specific task schedule. Use when the user wants to run a scheduled task immediately.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {
+                    "type": "string",
+                    "description": "The ID of the schedule to execute"
+                }
+            },
+            "required": ["schedule_id"]
+        }
+    },
+    {
+        "name": "get_task_run_by_id",
+        "description": "Get detailed information about a specific task run by its ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The ID of the task run to retrieve"
+                }
+            },
+            "required": ["run_id"]
+        }
+    },
+    {
+        "name": "get_task_schedule_by_id",
+        "description": "Get detailed information about a specific task schedule by its ID.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "schedule_id": {
+                    "type": "string",
+                    "description": "The ID of the schedule to retrieve"
+                }
+            },
+            "required": ["schedule_id"]
+        }
+
+    },
+    {
+        "name": "schedule_task",
+        "description": "Schedule a task to run at a specific date and time. Use when the user wants to set up a future or recurring automation.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_identifier": {
+                    "type": "string",
+                    "description": "The name or ID of the task template to schedule (e.g., 'Bank Reconciliation')"
+                },
+                "date": {
+                    "type": "string",
+                    "description": "Date in YYYY-MM-DD format"
+                },
+                "time": {
+                    "type": "string",
+                    "description": "Time in HH:MM format (24-hour)"
+                },
+                "priority": {
+                    "type": "string",
+                    "description": "Priority level (low, medium, high). Defaults to 'medium'"
+                },
+                "recurring": {
+                    "type": "boolean",
+                    "description": "Whether the task should repeat"
+                },
+                "frequency": {
+                    "type": "string",
+                    "description": "Frequency if recurring (daily, weekly, monthly)"
+                }
+            },
+            "required": ["task_identifier", "date", "time"]
+        }
     }
 ]
 
@@ -141,6 +228,7 @@ HAIBOT_FUNCTIONS = [
 # Map of function names to their display-friendly descriptions
 FUNCTION_DESCRIPTIONS = {
     "get_all_clients": "Fetching all clients...",
+    "get_available_tasks": "Fetching available task templates...",
     "get_client_details": "Looking up client details...",
     "create_client": "Creating new client...",
     "list_scheduled_tasks": "Fetching scheduled tasks...",
@@ -148,6 +236,11 @@ FUNCTION_DESCRIPTIONS = {
     "list_task_runs": "Fetching task run history...",
     "get_task_run_status": "Checking task run status...",
     "import_clients": "Importing clients from Excel...",
-    "get_user_profile": "Fetching user profile..."
+    "get_user_profile": "Fetching user profile...",
+    "create_task_run": "Triggering task execution...",
+    "get_task_run_by_id": "Retrieving task run details...",
+    "get_task_run_by_id": "Retrieving task run details...",
+    "get_task_schedule_by_id": "Retrieving schedule details...",
+    "schedule_task": "Scheduling new task..."
 }
 

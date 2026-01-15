@@ -11,7 +11,7 @@ class GroqService:
     def generate_chat_completion(
         self,
         messages: List[Dict[str, str]],
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "openai/gpt-oss-120b",
         temperature: float = 0.7,
         max_tokens: int = 1024,
         stream: bool = False,
@@ -19,7 +19,7 @@ class GroqService:
         tool_choice: str = "auto"
     ):
         """
-        Generate a chat completion with optional function calling support.
+        Generate a chat completion with JSON mode support.
         
         Args:
             messages: List of message dicts with role and content
@@ -27,21 +27,22 @@ class GroqService:
             temperature: Sampling temperature
             max_tokens: Maximum tokens in response
             stream: Whether to stream the response
-            tools: Optional list of tool/function definitions for function calling
-            tool_choice: How to select tools - "auto", "none", or specific tool
+            tools: Ignored in JSON mode, kept for compatibility signature
+            tool_choice: Ignored in JSON mode
         """
         kwargs = {
             "model": model,
             "messages": messages,
             "temperature": temperature,
             "max_tokens": max_tokens,
-            "stream": stream
+            "stream": stream,
+            "response_format": {"type": "json_object"}
         }
         
-        # Add tools if provided (function calling)
-        if tools:
-            kwargs["tools"] = tools
-            kwargs["tool_choice"] = tool_choice
+        # Tools are NOT passed to Groq when using JSON mode for gpt-oss-120b
+        # We rely on the prompt to enforce tool usage structure
+        
+        response = self.client.chat.completions.create(**kwargs)
         
         response = self.client.chat.completions.create(**kwargs)
         return response

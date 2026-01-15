@@ -3,6 +3,8 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*test_*
+verify_chatbot_data.py
 env/
 venv/
 ENV/

@@ -92,7 +92,7 @@ class HaibotApiService:
         """
         params = {}
         if session_id:
-            params["userId"] = session_id  # Changed from sessionId to userId per latest API update
+            params["user_id"] = session_id  # Changed to user_id (snake_case) per Swagger
             
         try:
             response = self.client.get("/clients", params=params)
@@ -111,18 +111,20 @@ class HaibotApiService:
             logger.error(f"Error getting clients: {e}")
             return []
     
-    def get_client_by_id(self, client_id: str) -> Optional[Dict[str, Any]]:
+    def get_client_by_id(self, client_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Get a specific client by ID.
         
         Args:
             client_id: The client's ID
+            user_id: Optional user ID for authorization
             
         Returns:
             Client object or None if not found
         """
         try:
-            response = self.client.get(f"/clients/{client_id}")
+            params = {"user_id": user_id} if user_id else {}
+            response = self.client.get(f"/clients/{client_id}", params=params)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:
@@ -175,7 +177,7 @@ class HaibotApiService:
     
     def create_client(
         self,
-        user_id: str,
+        profile_id: str,
         company_name: str,
         **optional_fields
     ) -> Dict[str, Any]:
@@ -183,7 +185,7 @@ class HaibotApiService:
         Create a new client.
         
         Args:
-            user_id: The user's ID
+            profile_id: The user's Profile ID
             company_name: Name of the client company
             **optional_fields: Additional client fields (published, source_name, etc.)
             
@@ -210,15 +212,14 @@ class HaibotApiService:
                 client_data[key] = value
         
         payload = {
-            "userId": user_id,
+            "profile_id": profile_id,
             "clientData": client_data
         }
         
         try:
             response = self.client.post(
                 "/clients",
-                json=payload,
-                params={"userId": user_id}
+                json=payload
             )
             response.raise_for_status()
             return response.json()
@@ -229,13 +230,30 @@ class HaibotApiService:
             logger.error(f"Error creating client: {e}")
             raise
     
+    # ==================== Task Templates ====================
+    
+    def get_all_tasks(self) -> List[Dict[str, Any]]:
+        """
+        Get all available task templates.
+        
+        Returns:
+            List of task objects
+        """
+        try:
+            response = self.client.get("/tasks")
+            response.raise_for_status()
+            return response.json()
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to get tasks: {e}")
+            return []
+    
     # ==================== Task Schedules ====================
     
     def get_all_task_schedules(self, session_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """Get all task schedules."""
         params = {}
         if session_id:
-            params["userId"] = session_id
+            params["user_id"] = session_id
             
         try:
             response = self.client.get("/task-schedules", params=params)
@@ -280,7 +298,11 @@ class HaibotApiService:
         task_id: str,
         time: str,
         date: str,
-        profile_id: str
+        profile_id: str,
+        priority: str = "medium",
+        recurring: bool = False,
+        frequency: str = "daily",
+        timezone: str = "UTC"
     ) -> Dict[str, Any]:
         """
         Create a new task schedule.
@@ -290,6 +312,10 @@ class HaibotApiService:
             time: Time to run (format: "HH:MM")
             date: Date to run (format: "YYYY-MM-DD")
             profile_id: Profile ID from session context
+            priority: Priority (low, medium, high)
+            recurring: Whether the task repeats
+            frequency: Frequency if recurring (daily, weekly, etc.)
+            timezone: Timezone string (default UTC)
             
         Returns:
             Created schedule object
@@ -304,7 +330,11 @@ class HaibotApiService:
                     "task_id": task_id,
                     "time": time,
                     "date": date,
-                    "profileId": profile_id
+                    "profile_id": profile_id,
+                    "priority": priority,
+                    "recurring": recurring,
+                    "frequency": frequency,
+                    "timezone": timezone
                 }
             )
             response.raise_for_status()
@@ -330,7 +360,7 @@ class HaibotApiService:
         """
         params = {}
         if session_id:
-            params["userId"] = session_id
+            params["user_id"] = session_id
             
         try:
             response = self.client.get("/task-runs", params=params)
@@ -351,37 +381,64 @@ class HaibotApiService:
             logger.error(f"Error getting task runs: {e}")
             return []
     
-    def get_task_run_by_id(self, run_id: str) -> Optional[Dict[str, Any]]:
+    def get_task_run_by_id(self, run_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Get a specific task run by ID.
         
         Args:
             run_id: The task run ID
+            user_id: Optional user ID for authorization
             
         Returns:
             Task run object or None if not found
         """
         try:
-            response = self.client.get(f"/task-runs/{run_id}")
+            params = {"user_id": user_id} if user_id else {}
+            response = self.client.get(f"/task-runs/{run_id}", params=params)
             response.raise_for_status()
-            return response.json()
+            data = response.json()
+            return data.get("data", data)
         except httpx.HTTPStatusError as e:
             logger.error(f"Failed to get task run {run_id}: {e}")
             return None
         except Exception as e:
             logger.error(f"Error getting task run: {e}")
             return None
-    
+
+    def get_task_schedule_by_id(self, schedule_id: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """
+        Get a specific task schedule by ID.
+        
+        Args:
+            schedule_id: The task schedule ID
+            user_id: Optional user ID for authorization
+            
+        Returns:
+            Task schedule object or None if not found
+        """
+        try:
+            params = {"user_id": user_id} if user_id else {}
+            response = self.client.get(f"/task-schedules/{schedule_id}", params=params)
+            response.raise_for_status()
+            data = response.json()
+            return data.get("data", data)
+        except httpx.HTTPStatusError as e:
+            logger.error(f"Failed to get task schedule {schedule_id}: {e}")
+            return None
+        except Exception as e:
+            logger.error(f"Error getting task schedule: {e}")
+            return None
+
     def create_task_run(
         self,
-        scheduled_id: str,
+        schedule_id: str,
         profile_id: str
     ) -> Dict[str, Any]:
         """
         Create a new task run (trigger execution).
         
         Args:
-            scheduled_id: ID of the schedule to execute
+            schedule_id: ID of the schedule to execute
             profile_id: Profile ID from session context
             
         Returns:
@@ -394,7 +451,7 @@ class HaibotApiService:
             response = self.client.post(
                 "/task-runs",
                 json={
-                    "scheduled_id": scheduled_id,
+                    "schedule_id": schedule_id,
                     "profile_id": profile_id
                 }
             )
@@ -429,21 +486,22 @@ class HaibotApiService:
         
         return None
     
-    def find_client_by_name(self, client_name: str) -> Optional[Dict[str, Any]]:
+    def find_client_by_name(self, client_name: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
         """
         Find a client by name (fuzzy match).
         
         Args:
             client_name: Name to search for
+            user_id: Optional user ID for context
             
         Returns:
             Matching client or None
         """
-        clients = self.get_all_clients()
+        clients = self.get_all_clients(session_id=user_id)
         client_name_lower = client_name.lower()
         
         for client in clients:
-            name = client.get("name", "").lower()
+            name = client.get("company_name", "").lower()
             if client_name_lower in name or name in client_name_lower:
                 return client
         
