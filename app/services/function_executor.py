@@ -4,6 +4,7 @@ Routes LLM function calls to the appropriate API service methods.
 """
 import json
 import logging
+import uuid
 from typing import Dict, Any, Optional
 
 from app.services.haibot_api_service import HaibotApiService
@@ -43,6 +44,13 @@ class FunctionExecutor:
         """
         self.api = api_service
         self.session = session
+    
+    def _is_uuid(self, val: str) -> bool:
+        try:
+            uuid.UUID(str(val))
+            return True
+        except ValueError:
+            return False
     
     def execute(self, function_name: str, arguments: Dict[str, Any]) -> str:
         """
@@ -164,10 +172,12 @@ class FunctionExecutor:
         if not client_identifier:
             return "Please provide a client name or ID."
         
-        # Try to get by ID first
-        client = self.api.get_client_by_id(client_identifier, user_id=self.session.profile_id)
+        # Try to get by ID first IF it looks like a UUID
+        client = None
+        if self._is_uuid(client_identifier):
+            client = self.api.get_client_by_id(client_identifier, user_id=self.session.profile_id)
         
-        # If not found, try searching by name
+        # If not found or not a UUID, try searching by name
         if not client:
             client = self.api.find_client_by_name(client_identifier, user_id=self.session.profile_id)
         
@@ -251,8 +261,11 @@ class FunctionExecutor:
             
         return "Available Task Templates:\n" + "\n".join(task_list)
 
-    def _schedule_task(self, task_identifier: str, date: str, time: str, priority: str = "medium", recurring: bool = False, frequency: str = "daily") -> str:
+    def _schedule_task(self, task_identifier: str = None, task_id: str = None, date: str = "", time: str = "", priority: str = "medium", recurring: bool = False, frequency: str = "daily") -> str:
         """Create a new task schedule."""
+        # Handle parameter alias from LLM
+        target_task = task_identifier or task_id
+        
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
@@ -261,13 +274,13 @@ class FunctionExecutor:
             except Exception as e:
                 return f"Session error: {e}"
         
-        if not task_identifier:
+        if not target_task:
             return "Please provide a valid task name or ID."
 
         # Try to resolve task ID from name if needed
-        task_id = task_identifier
+        final_task_id = target_task
         # If it doesn't look like a UUID, try to find by name
-        if len(task_identifier) < 30: 
+        if len(target_task) < 30: 
              tasks = self.api.get_all_tasks()
              # Unwrap
              if isinstance(tasks, dict) and "data" in tasks:
@@ -276,17 +289,17 @@ class FunctionExecutor:
              found = False
              if tasks:
                  for t in tasks:
-                     if task_identifier.lower() in t.get("name", "").lower():
-                         task_id = t.get("id")
+                     if target_task.lower() in t.get("name", "").lower():
+                         final_task_id = t.get("id")
                          found = True
                          break
              
              if not found:
-                 return f"Could not find task template matching '{task_identifier}'"
+                 return f"Could not find task template matching '{target_task}'"
 
         try:
             result = self.api.create_task_schedule(
-                task_id=task_id,
+                task_id=final_task_id,
                 time=time,
                 date=date,
                 profile_id=self.session.profile_id,
@@ -353,8 +366,10 @@ class FunctionExecutor:
         if not schedule_identifier:
             return "Please provide a schedule name or ID."
         
-        # Try to get by ID first
-        schedule = self.api.get_task_schedule_by_id(schedule_identifier)
+        # Try to get by ID first IF uuid
+        schedule = None
+        if self._is_uuid(schedule_identifier):
+            schedule = self.api.get_task_schedule_by_id(schedule_identifier)
         
         # If not found, try searching by name  
         if not schedule:
@@ -439,8 +454,10 @@ class FunctionExecutor:
             run = runs[0]
             run_id = run.get("id")
         
-        # Try to get by ID first
-        run = self.api.get_task_run_by_id(run_id, user_id=self.session.profile_id)
+        # Try to get by ID first IF uuid
+        run = None
+        if self._is_uuid(run_id):
+            run = self.api.get_task_run_by_id(run_id, user_id=self.session.profile_id)
         
         # If not found, try searching by task name
         if not run:
