@@ -417,12 +417,21 @@ class HaibotApiService:
             Task schedule object or None if not found
         """
         try:
+            # Validate UUID format to prevent API 500/404 on bad IDs
+            try:
+                uuid.UUID(str(schedule_id))
+            except ValueError:
+                return None
+                
             params = {"user_id": user_id} if user_id else {}
             response = self.client.get(f"/task-schedules/{schedule_id}", params=params)
             response.raise_for_status()
             data = response.json()
             return data.get("data", data)
         except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                # This is normal behavior when checking if a schedule exists
+                return None
             logger.error(f"Failed to get task schedule {schedule_id}: {e}")
             return None
         except Exception as e:
@@ -480,7 +489,13 @@ class HaibotApiService:
         task_name_lower = task_name.lower()
         
         for schedule in schedules:
-            schedule_name = schedule.get("task_name", "").lower()
+            # Handle nested task object or flat task_name
+            task_obj = schedule.get("task", {})
+            if isinstance(task_obj, dict):
+                schedule_name = task_obj.get("name", "").lower()
+            else:
+                schedule_name = schedule.get("task_name", "").lower()
+                
             if task_name_lower in schedule_name or schedule_name in task_name_lower:
                 return schedule
         

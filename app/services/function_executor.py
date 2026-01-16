@@ -21,13 +21,30 @@ class FunctionExecutor:
     for profileId/tenantId and resolving names to IDs when necessary.
     """
     
-    # Mapping of task names to task IDs (extend this based on available tasks)
     TASK_ID_MAP = {
         "bank reconciliation": "task-bank-recon",
         "payroll processing": "task-payroll",
         "invoice processing": "task-invoice",
         "transaction categorization": "task-categorization",
         "report generation": "task-report",
+    }
+    
+    FUNCTION_MAPPINGS = {
+        "get_all_clients": "_get_all_clients",
+        "get_client_details": "_get_client_details",
+        "create_client": "_create_client",
+        "list_scheduled_tasks": "_list_scheduled_tasks",
+        "get_available_tasks": "_get_available_tasks",
+        "schedule_task": "_schedule_task",
+        "get_schedule_details": "_get_schedule_details",
+        "run_task_now": "_run_task_now",
+        "list_task_runs": "_list_task_runs",
+        "get_task_run_status": "_get_task_run_status",
+        "import_clients": "_import_clients",
+        "get_user_profile": "_get_user_profile",
+        "create_task_run": "_create_task_run",
+        "get_task_run_by_id": "_get_task_run_by_id_wrapper",
+        "get_task_schedule_by_id": "_get_task_schedule_by_id_wrapper"
     }
     
     def __init__(
@@ -64,62 +81,25 @@ class FunctionExecutor:
             String result to be sent back to the LLM
         """
         try:
+            print(f"DEBUG_EXECUTE: Calling {function_name} with args={arguments}")
             if function_name == "get_all_clients":
                 return self._get_all_clients(arguments.get("limit"))
             
-            elif function_name == "get_client_details":
-                return self._get_client_details(arguments.get("client_identifier", ""))
             
-            elif function_name == "create_client":
-                return self._create_client(
-                    company_name=arguments.get("company_name", ""),
-                    source_name=arguments.get("source_name")
-                )
+            # Special handling for get_all_clients? (Optional, but keeping it simple)
+            # Dynamic execution for all mapped functions
+            method_name = self.FUNCTION_MAPPINGS.get(function_name)
+            if not method_name or not hasattr(self, method_name):
+                print(f"DEBUG_EXECUTE: Function {function_name} not found in mapping")
+                return f"Function {function_name} is not implemented."
             
-            elif function_name == "list_scheduled_tasks":
-                return self._list_scheduled_tasks(arguments.get("limit"))
-            
-            elif function_name == "get_available_tasks":
-                return self._get_available_tasks()
-            
-            elif function_name == "schedule_task":
-                return self._schedule_task(
-                    task_id=arguments.get("task_id", ""),
-                    date=arguments.get("date", ""),
-                    time=arguments.get("time", ""),
-                    priority=arguments.get("priority", "medium"),
-                    recurring=arguments.get("recurring", False),
-                    frequency=arguments.get("frequency", "daily")
-                )
-            
-            elif function_name == "run_task_now":
-                return self._run_task_now(arguments.get("task_identifier", ""))
-            
-            elif function_name == "list_task_runs":
-                return self._list_task_runs(arguments.get("limit"))
-            
-            elif function_name == "get_task_run_status":
-                return self._get_task_run_status(arguments.get("run_id", ""))
-            
-            elif function_name == "import_clients":
-                return self._import_clients(arguments.get("file_path", ""))
-            
-            elif function_name == "get_user_profile":
-                return self._get_user_profile(arguments.get("include_details", True))
-            
-            elif function_name == "create_task_run":
-                return self._create_task_run(arguments.get("schedule_id", ""))
-                
-            elif function_name == "get_task_run_by_id":
-                return self._get_task_run_by_id_wrapper(arguments.get("run_id", ""))
-                
-            elif function_name == "get_task_schedule_by_id":
-                return self._get_task_schedule_by_id_wrapper(arguments.get("schedule_id", ""))
-            
-            else:
-                return f"Unknown function: {function_name}"
+            method = getattr(self, method_name)
+            result = method(**arguments)
+            print(f"DEBUG_EXECUTE: {function_name} returned: {str(result)[:200]}...")
+            return result
                 
         except Exception as e:
+            print(f"DEBUG_EXECUTE: Error executing {function_name}: {e}")
             logger.error(f"Error executing function {function_name}: {e}")
             return f"Error executing {function_name}: {str(e)}"
     
@@ -303,7 +283,7 @@ class FunctionExecutor:
                 time=time,
                 date=date,
                 profile_id=self.session.profile_id,
-                priority=priority,
+                priority=priority.lower(),
                 recurring=recurring,
                 frequency=frequency
             )
@@ -312,6 +292,7 @@ class FunctionExecutor:
             return f"Successfully scheduled task (ID: {sched_id}) for {date} at {time}."
             
         except Exception as e:
+            print(f"DEBUG_SCHEDULE_TASK ERROR: {str(e)}")
             return f"Failed to schedule task: {str(e)}"
     
     # ==================== Schedule Functions ====================
@@ -442,7 +423,8 @@ class FunctionExecutor:
             return "Please provide a run ID or task name."
             
         # Handle "latest" or "last" request
-        if run_id.lower() in ["latest", "last", "current"]:
+        # Handle "last" or "latest" keyword
+        if run_id.lower() in ["last", "latest"]:
             runs = self.api.get_all_task_runs(session_id=self.session.profile_id)
             # Unwrap if needed
             if isinstance(runs, dict) and "data" in runs:
@@ -450,7 +432,7 @@ class FunctionExecutor:
             
             if not runs:
                 return "No task runs found."
-            # Assuming API returns sorted or we pick first
+            # API returns newest first
             run = runs[0]
             run_id = run.get("id")
         
@@ -494,9 +476,19 @@ class FunctionExecutor:
         # Find the schedule
         schedule = self.api.find_schedule_by_name(identifier)
         if not schedule:
+            # Check if it's a valid task template but just not scheduled
             schedule = self.api.get_task_schedule_by_id(identifier)
-        
+            
         if not schedule:
+            # One last check: Is it a task name that hasn't been scheduled?
+            # We can't run a task that isn't scheduled (as per API requirement for schedule_id).
+            tasks = self.api.get_all_tasks()
+            if isinstance(tasks, dict) and "data" in tasks: tasks = tasks["data"]
+            
+            for t in tasks:
+                if identifier.lower() in t.get("name", "").lower():
+                     return f"The task '{t['name']}' exists but is not currently scheduled. You must schedule it first before running it."
+                     
             return f"Could not find scheduled task matching '{identifier}'"
         
         try:

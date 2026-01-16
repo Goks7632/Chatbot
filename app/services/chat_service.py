@@ -2,6 +2,7 @@ from sqlalchemy.orm import Session
 from typing import List, Dict, Optional, Any
 import json
 import logging
+from datetime import datetime
 
 from app.repositories.conversation_repository import ConversationRepository
 from app.repositories.message_repository import MessageRepository
@@ -119,8 +120,10 @@ class ChatService:
             {"role": msg.role.value, "content": msg.content}
             for msg in messages
         ]
-        # Prepend system prompt
-        return [{"role": "system", "content": SYSTEM_PROMPT}] + formatted_messages
+        # Prepend system prompt with date context
+        current_date_str = datetime.now().strftime('%Y-%m-%d')
+        enhanced_system_prompt = f"{SYSTEM_PROMPT}\n\nCurrent Date: {current_date_str}"
+        return [{"role": "system", "content": enhanced_system_prompt}] + formatted_messages
     
     def _get_tools_definition(self) -> List[Dict[str, Any]]:
         """Convert function definitions to tools format for Groq."""
