@@ -5,7 +5,8 @@ Routes LLM function calls to the appropriate API service methods.
 import json
 import logging
 import uuid
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
+from datetime import datetime, timedelta
 
 from app.services.haibot_api_service import HaibotApiService
 from app.services.session_context import SessionContext
@@ -36,13 +37,13 @@ class FunctionExecutor:
         "list_scheduled_tasks": "_list_scheduled_tasks",
         "get_available_tasks": "_get_available_tasks",
         "schedule_task": "_schedule_task",
-        "get_schedule_details": "_get_schedule_details",
+        "get_schedule_details": "_get_task_schedule_by_id_wrapper",
         "run_task_now": "_run_task_now",
         "list_task_runs": "_list_task_runs",
         "get_task_run_status": "_get_task_run_status",
         "import_clients": "_import_clients",
         "get_user_profile": "_get_user_profile",
-        "create_task_run": "_create_task_run",
+        "create_task_run": "_run_task_now",
         "get_task_run_by_id": "_get_task_run_by_id_wrapper",
         "get_task_schedule_by_id": "_get_task_schedule_by_id_wrapper"
     }
@@ -246,6 +247,15 @@ class FunctionExecutor:
         # Handle parameter alias from LLM
         target_task = task_identifier or task_id
         
+        # Ensure boolean/null conversion for recurring/frequency
+        if str(recurring).lower() in ("false", "no", "0"):
+            recurring = False
+        elif str(recurring).lower() in ("true", "yes", "1"):
+            recurring = True
+            
+        if str(frequency).lower() in ("none", "null", ""):
+            frequency = None
+            
         if not self.session.is_verified():
             try:
                 result = self.api.verify_session(self.session.user_id)
@@ -258,24 +268,21 @@ class FunctionExecutor:
             return "Please provide a valid task name or ID."
 
         # Try to resolve task ID from name if needed
-        final_task_id = target_task
-        # If it doesn't look like a UUID, try to find by name
-        if len(target_task) < 30: 
-             tasks = self.api.get_all_tasks()
-             # Unwrap
-             if isinstance(tasks, dict) and "data" in tasks:
-                 tasks = tasks["data"]
-             
-             found = False
-             if tasks:
-                 for t in tasks:
-                     if target_task.lower() in t.get("name", "").lower():
-                         final_task_id = t.get("id")
-                         found = True
-                         break
-             
-             if not found:
-                 return f"Could not find task template matching '{target_task}'"
+        resolve_result = self._resolve_task_id(target_task)
+        
+        # Handle multiple matches (Ambiguity)
+        if isinstance(resolve_result, list):
+            options = [f"{m['name']} ({m['bot']})" for m in resolve_result]
+            options_str = ", ".join(options)
+            return f"I found multiple tasks matching '{target_task}': {options_str}. Please specify which bot you would like to use (e.g. 'Use Dext', 'Use Xero')."
+            
+        final_task_id = resolve_result
+
+        # If it's a direct ID, verify it exists (optional but good practice)
+        # Note: _resolve_task_id returns the input string if no match found, which might be a valid ID.
+        if final_task_id == target_task.replace(" ", "-").lower() and len(final_task_id) < 30:
+             # It was a name, but no match found in API or static map
+             return f"Could not find task template matching '{target_task}' or any valid ID."
 
         try:
             result = self.api.create_task_schedule(
@@ -288,7 +295,13 @@ class FunctionExecutor:
                 frequency=frequency
             )
             
-            sched_id = result.get("id", "unknown")
+            # Handle nested response: {data: {schedule: {id: ...}}}
+            sched_data = result.get("data", {})
+            if "schedule" in sched_data:
+                sched_id = sched_data["schedule"].get("id")
+            else:
+                sched_id = result.get("id", "unknown")
+                
             return f"Successfully scheduled task (ID: {sched_id}) for {date} at {time}."
             
         except Exception as e:
@@ -329,7 +342,8 @@ class FunctionExecutor:
             priority = sched.get("priority", "N/A")
             recurring = sched.get("recurring", False)
             frequency = sched.get("frequency", "N/A") if recurring else "one-time"
-            schedule_list.append(f"- Schedule ID: {sched_id}, Time: {scheduled_time}, Priority: {priority}, Type: {frequency}")
+            task_name = sched.get("task", {}).get("name", "Unknown")
+            schedule_list.append(f"- Task: {task_name}, Schedule ID: {sched_id}, Time: {scheduled_time}, Priority: {priority}, Type: {frequency}")
             
         return f"Found {len(schedules)} schedules:\n" + "\n".join(schedule_list)
     
@@ -449,14 +463,70 @@ class FunctionExecutor:
                 all_runs = all_runs["data"]
                 
             # Find first run matching the name
+            # Find first run matching the name OR matching task ID OR matching schedule ID
+            # The user might have passed the task TEMPLATE ID (e.g. e417670...) thinking it's the run ID.
+            # We should check if run_id matches task['id'] or task['schedule_id'] in the run history.
+            
+            matching_runs = []
             for r in all_runs:
                 task_name = r.get("task", {}).get("name", "").lower()
+                t_id = r.get("task", {}).get("id", "")
+                # Note: 'schedule_id' might not be directly on the run object depending on API version,
+                # but let's check top-level and inside task.
+                s_id = r.get("schedule_id") 
+                
+                # Check 1: Name substring match
                 if run_id.lower() in task_name:
-                    run = r
-                    break
-        
-        if not run:
-            return f"Could not find task run matching '{run_id}'"
+                    matching_runs.append(r)
+                    continue
+                    
+                # Check 2: Task Template ID match
+                if run_id == t_id:
+                    matching_runs.append(r)
+                    continue
+                    
+                # Check 3: Schedule ID match
+                if s_id and run_id == s_id:
+                    matching_runs.append(r)
+                    continue
+
+            # If matches found, we want to return the latest status for EACH unique task/schedule found
+            # instead of just the single latest run overall.
+            results_by_task = {}
+            for r in matching_runs:
+                # Group by Task Name (or ID) to ensure we show one entry per task type
+                t_name = r.get("task", {}).get("name", "Unknown Task")
+                t_bot = r.get("task", {}).get("bot", {}).get("name", "Unknown Bot")
+                key = f"{t_name} ({t_bot})"
+                
+                # We want the latest run for this task
+                current_latest = results_by_task.get(key)
+                if not current_latest:
+                     results_by_task[key] = r
+                else:
+                     # Compare started_at
+                     curr_start = current_latest.get("started_at") or ""
+                     new_start = r.get("started_at") or ""
+                     if new_start > curr_start:
+                         results_by_task[key] = r
+
+            if not results_by_task:
+                 return f"Could not find any task runs matching '{run_id}'"
+
+            # Format output for all found tasks
+            output_parts = []
+            for name, run in results_by_task.items():
+                 details = [
+                    f"--- {name} ---",
+                    f"Run ID: {run.get('id', 'N/A')}",
+                    f"Status: {run.get('status', 'N/A')}",
+                    f"Started: {run.get('started_at', 'N/A')}",
+                    f"Result: {run.get('result', 'No result yet')}"
+                 ]
+                 output_parts.append("\n".join(details))
+            
+            return f"Found matching runs for '{run_id}':\n\n" + "\n\n".join(output_parts)
+
         
         details = [
             f"Run ID: {run.get('id', 'N/A')}",
@@ -468,40 +538,171 @@ class FunctionExecutor:
         
         return "\n".join(details)
     
-    def _run_task_now(self, identifier: str) -> str:
+    def _run_task_now(self, identifier: str = None, schedule_id: str = None) -> str:
         """Trigger immediate execution of a scheduled task."""
+        # Handle parameter alias from LLM (create_task_run sends schedule_id)
+        identifier = identifier or schedule_id
+        
+        if not identifier:
+            return "Please provide a task name or schedule ID."
+            
         if not self.session.is_verified():
             return "Session not verified. Please provide your user ID first."
         
-        # Find the schedule
-        schedule = self.api.find_schedule_by_name(identifier)
-        if not schedule:
-            # Check if it's a valid task template but just not scheduled
-            schedule = self.api.get_task_schedule_by_id(identifier)
-            
-        if not schedule:
-            # One last check: Is it a task name that hasn't been scheduled?
-            # We can't run a task that isn't scheduled (as per API requirement for schedule_id).
-            tasks = self.api.get_all_tasks()
-            if isinstance(tasks, dict) and "data" in tasks: tasks = tasks["data"]
-            
-            for t in tasks:
-                if identifier.lower() in t.get("name", "").lower():
-                     return f"The task '{t['name']}' exists but is not currently scheduled. You must schedule it first before running it."
-                     
-            return f"Could not find scheduled task matching '{identifier}'"
+        # 1. Check if a SCHEDULE already exists for this task
+        # We need to fetch all schedules to check for ambiguity here too
+        # Use correct API method name
+        all_schedules = self.api.get_all_task_schedules(session_id=self.session.profile_id)
         
+        if isinstance(all_schedules, dict) and "data" in all_schedules:
+            all_schedules = all_schedules["data"]
+            
+        matching_schedules = []
+        if all_schedules:
+            for sched in all_schedules:
+                t_name = sched.get("task", {}).get("name", "").lower()
+                t_bot = sched.get("task", {}).get("bot", {}).get("name", "")
+                s_id = sched.get("id")
+                
+                # Check if identifier matches matches task name or Schedule ID
+                if identifier.lower() in t_name or t_name in identifier.lower() or identifier == s_id:
+                     matching_schedules.append({
+                        "id": s_id,
+                        "name": sched.get("task", {}).get("name"),
+                        "bot": t_bot
+                    })
+
+        # Filter schedule matches if user specified bot name
+        if len(matching_schedules) > 1:
+            refined = []
+            for m in matching_schedules:
+                if m["bot"].lower() in identifier.lower():
+                    refined.append(m)
+            if refined:
+                matching_schedules = refined
+
+        # If duplicate schedules found
+        if len(matching_schedules) > 1:
+             # Group by bot to handle duplicates (e.g. 18 Xero schedules)
+             unique_bots = {}
+             for m in matching_schedules:
+                 bot_name = m["bot"]
+                 if bot_name not in unique_bots:
+                     unique_bots[bot_name] = []
+                 unique_bots[bot_name].append(m)
+                 
+             # If multiple bots found, ask for clarification
+             if len(unique_bots) > 1:
+                 options = [f"{bot} ({len(items)})" for bot, items in unique_bots.items()]
+                 options_str = ", ".join(options)
+                 return f"I found schedules for multiple bots: {options_str}. Please specify which bot you would like to run (e.g. 'Run Invoice Upload Xero')."
+
+             # If all duplicates belong to one bot, proceed with the first one
+             if len(unique_bots) == 1:
+                 # Auto-select the first one
+                 matching_schedules = [matching_schedules[0]]
+
+        # Fallback ambiguity check
+        if len(matching_schedules) > 1:
+             options = [f"{m['name']} ({m['bot']})" for m in matching_schedules]
+             options_str = ", ".join(options)
+             return f"I found multiple schedules for '{identifier}': {options_str}. Please specify which bot you would like to run."
+             
+        # If exactly one schedule found, use it
+        if len(matching_schedules) == 1:
+            schedule_id = matching_schedules[0]["id"]
+            try:
+                result = self.api.create_task_run(schedule_id=schedule_id, profile_id=self.session.profile_id)
+                # handle if result is a string (error)
+                if isinstance(result, str): return result
+                
+                # Handle nested response: {data: {taskRun: {id: ...}}}
+                run_data = result.get("data", {})
+                if "taskRun" in run_data:
+                     run_id = run_data["taskRun"].get("id", "unknown")
+                else:
+                     run_id = result.get("id", "unknown")
+                return f"Successfully triggered run for schedule '{identifier}' (Run ID: {run_id})."
+            except Exception as e:
+                return f"Failed to trigger task run: {str(e)}"
+
+        # 2. If NO schedule found, find the TASK TEMPLATE
+        resolve_result = self._resolve_task_id(identifier)
+        
+        # Handle ambiguity in templates
+        if isinstance(resolve_result, list):
+            options = [f"{m['name']} ({m['bot']})" for m in resolve_result]
+            options_str = ", ".join(options)
+            return f"I found multiple tasks matching '{identifier}': {options_str}. Please specify which bot you would like to use."
+            
+        task_id = resolve_result
+        if task_id == identifier.replace(" ", "-").lower() and len(task_id) < 30:
+             return f"Could not find any schedule or task template matching '{identifier}'."
+             
+        # 3. Valid template found, but no schedule. Create one, then run.
         try:
-            result = self.api.create_task_run(
-                scheduled_id=schedule["id"],
-                profile_id=self.session.profile_id
-            )
-            
-            run_id = result.get("id", "unknown")
-            return f"Task execution triggered successfully. Run ID: {run_id}"
-            
+             # Create a one-time schedule for immediate execution
+             # Using a date far in the future or today? User logic implies just "schedule it".
+             # We'll use today's date and current time + 1 min as a placeholder, 
+             # but strictly we just need a schedule ID to run it.
+             now = datetime.now()
+             date_str = now.strftime("%Y-%m-%d")
+             time_str = (now + timedelta(minutes=2)).strftime("%H:%M")
+             
+             sched_response = self.api.create_task_schedule(
+                 task_id=task_id,
+                 time=time_str,
+                 date=date_str,
+                 profile_id=self.session.profile_id,
+                 priority="medium",
+                 recurring=False
+             )
+             
+             # Handle nested response: {data: {schedule: {id: ...}}}
+             sched_data = sched_response.get("data", {})
+             if "schedule" in sched_data:
+                 new_sched_id = sched_data["schedule"].get("id")
+             else:
+                 new_sched_id = sched_response.get("id")
+                 
+             if not new_sched_id:
+                  return f"Failed to create schedule. Response: {str(sched_response)}"
+                  
+             # Run it
+             run_response = self.api.create_task_run(schedule_id=new_sched_id, profile_id=self.session.profile_id)
+             if isinstance(run_response, str): return run_response
+             
+             # Handle nested run response
+             run_data = run_response.get("data", {})
+             if "taskRun" in run_data:
+                  run_id = run_data["taskRun"].get("id", "unknown")
+             else:
+                  run_id = run_response.get("id", "unknown")
+                  
+             return f"Created one-time schedule '{identifier}' (ID: {new_sched_id}) and triggered run (Run ID: {run_id})."
+             if "schedule" in sched_data:
+                sched_id = sched_data["schedule"].get("id")
+             else:
+                sched_id = sched_response.get("id")
+                
+             if not sched_id:
+                 return f"Failed to create schedule for '{identifier}'."
+                 
+             # Now run it
+             run_response = self.api.create_task_run(schedule_id=sched_id, profile_id=self.session.profile_id)
+             
+             # Handle nested run response
+             run_data = run_response.get("data", {})
+             if "taskRun" in run_data:
+                run_id = run_data["taskRun"].get("id", "unknown")
+             else:
+                run_id = run_response.get("id", "unknown")
+                
+             return f"No existing schedule found, so I created a new schedule for '{identifier}' and triggered it successfully (Run ID: {run_id})."
+             
         except Exception as e:
-            return f"Failed to trigger task execution: {str(e)}"
+            return f"Failed to schedule and run task: {str(e)}"
+
     
     # ==================== Import Functions ====================
     
@@ -592,7 +793,10 @@ class FunctionExecutor:
             
             return f"Successfully triggered task run (Run ID: {run_id}). Status: {run_obj.get('status', 'unknown')}"
         except Exception as e:
-            return f"Failed to list task run: {str(e)}"
+            error_str = str(e)
+            if "404" in error_str or "Not Found" in error_str:
+                return f"Failed to create task run: Scheduled task not found for ID '{schedule_id}'. Please ensure the task is scheduled first."
+            return f"Failed to list task run: {error_str}"
 
     def _get_task_run_by_id_wrapper(self, run_id: str) -> str:
         """Get details of a specific task run by ID."""
@@ -603,6 +807,14 @@ class FunctionExecutor:
             return "Please provide a run ID."
             
         try:
+            # Check for "latest" or "last" logical ID
+            if run_id.lower() in ["latest", "last"]:
+                 return self._get_task_run_status(run_id)
+            
+            # Prevent 500 errors: If not a UUID, treat as a name search
+            if not self._is_uuid(run_id):
+                 return self._get_task_run_status(run_id)
+
             # Pass user_id for authorization
             run = self.api.get_task_run_by_id(run_id, user_id=self.session.user_id)
             if not run:
@@ -619,47 +831,139 @@ class FunctionExecutor:
         except Exception as e:
             return f"Error retrieving task run: {str(e)}"
 
-    def _get_task_schedule_by_id_wrapper(self, schedule_id: str) -> str:
-        """Get details of a specific task schedule by ID."""
+    def _get_task_schedule_by_id_wrapper(self, schedule_id: str = None, schedule_identifier: str = None) -> str:
+        """Get details of a specific task schedule by ID or fuzzy name (Task/Bot)."""
+        # Handle alias
+        schedule_id = schedule_id or schedule_identifier
+
         if not self.session.is_verified():
              return "Session not verified. Please provide your user ID first."
              
         if not schedule_id:
-            return "Please provide a schedule ID."
+            return "Please provide a schedule ID or task name."
             
+        # 1. Try exact ID lookup first if it looks like a valid UUID
+        # Note: self._is_uuid is checking if the string is a valid UUID
+        if self._is_uuid(schedule_id):
+            try:
+                # API service method doesn't take user_id, it uses client config or context
+                schedule = self.api.get_task_schedule_by_id(schedule_id)
+                if schedule:
+                    details = [
+                        f"Schedule ID: {schedule.get('id', 'N/A')}",
+                        f"Task: {schedule.get('task', {}).get('name', 'N/A')}",
+                        f"Bot: {schedule.get('task', {}).get('bot', {}).get('name', 'N/A')}",
+                        f"Time: {schedule.get('time', 'N/A')}", # Note: API might return 'time' or 'scheduled_time' depending on endpoint
+                        f"Priority: {schedule.get('priority', 'N/A')}",
+                        f"Recurring: {schedule.get('recurring', False)}"
+                    ]
+                    return "\n".join(details)
+            except Exception:
+                pass # Fallback to search
+
+        # 2. Search all schedules for fuzzy match
         try:
-            # Pass user_id for authorization
-            schedule = self.api.get_task_schedule_by_id(schedule_id, user_id=self.session.user_id)
-            if not schedule:
-                 return f"Could not find schedule with ID '{schedule_id}'"
+             # Use the correct method to fetch task schedules
+             all_schedules = self.api.get_all_task_schedules(session_id=self.session.profile_id)
+             if isinstance(all_schedules, dict) and "data" in all_schedules:
+                 all_schedules = all_schedules["data"]
+                 
+             matches = []
+             target = schedule_id.lower()
+             
+             for sched in all_schedules:
+                 s_id = sched.get("id")
+                 t_name = sched.get("task", {}).get("name", "").lower()
+                 t_bot = sched.get("task", {}).get("bot", {}).get("name", "").lower()
+                 
+                 # Check matches: exact ID, substring Task Name, substring Bot Name
+                 if s_id == target:
+                     matches.append(sched)
+                 elif target in t_name:
+                     matches.append(sched)
+                 elif target in t_bot:
+                     matches.append(sched)
             
-            details = [
-                f"Schedule ID: {schedule.get('id', 'N/A')}",
-                f"Time: {schedule.get('scheduled_time', 'N/A')}",
-                f"Priority: {schedule.get('priority', 'N/A')}",
-                f"Recurring: {schedule.get('recurring', False)}"
-            ]
-            return "\n".join(details)
+             if not matches:
+                 return f"Could not find schedule matching '{schedule_id}'."
+            
+             if not matches:
+                 return f"Could not find schedule matching '{schedule_id}'."
+            
+             # Return ALL matches
+             output_parts = []
+             for schedule in matches:
+                 details = [
+                    f"--- Schedule ID: {schedule.get('id', 'N/A')} ---",
+                    f"Task: {schedule.get('task', {}).get('name', 'N/A')}",
+                    f"Bot: {schedule.get('task', {}).get('bot', {}).get('name', 'N/A')}",
+                    f"Time: {schedule.get('time') or schedule.get('scheduled_time') or 'N/A'}",
+                    f"Date: {schedule.get('date', 'N/A')}",
+                    f"Priority: {schedule.get('priority', 'N/A')}",
+                    f"Recurring: {schedule.get('recurring', False)}"
+                ]
+                 output_parts.append("\n".join(details))
+             
+             return f"Found {len(matches)} matching schedules for '{schedule_id}':\n\n" + "\n\n".join(output_parts)
+             
         except Exception as e:
             return f"Error retrieving schedule: {str(e)}"
 
     # ==================== Helper Methods ====================
     
-    def _resolve_task_id(self, task_name: str) -> str:
+    def _resolve_task_id(self, task_name: str) -> Union[str, List[Dict[str, str]]]:
         """
         Resolve a task name to a task ID.
-        
-        Args:
-            task_name: Human-readable task name
-            
-        Returns:
-            Task ID string
+        Returns either a single ID string (if unique/exact) or a list of matches.
         """
         task_name_lower = task_name.lower()
         
+        # Fetch all available tasks from API to get full context (bot names)
+        all_tasks = self.api.get_all_tasks(user_id=self.session.user_id)
+        
+        # Unwrap if needed
+        if isinstance(all_tasks, dict) and "data" in all_tasks:
+            all_tasks = all_tasks["data"]
+            
+        matches = []
+        
+        for task in all_tasks:
+            t_name = task.get("name", "").lower()
+            # API inconsistency: /task-schedules uses 'bot', /tasks uses 'bots'
+            t_bot_obj = task.get("bot") or task.get("bots") or {}
+            t_bot = t_bot_obj.get("name", "")
+            t_id = task.get("id")
+            
+            # Check if task name matches
+            if task_name_lower in t_name or t_name in task_name_lower:
+                matches.append({
+                    "id": t_id,
+                    "name": task.get("name"),
+                    "bot": t_bot
+                })
+                
+        # Filter matches if user specified bot name (e.g. "Invoice Upload Xero")
+        if len(matches) > 1:
+            refined_matches = []
+            for m in matches:
+                # If the user query contains the bot name, narrow down to that one
+                if m["bot"].lower() in task_name_lower:
+                    refined_matches.append(m)
+            
+            if refined_matches:
+                matches = refined_matches
+
+        # If we have exactly one match, return its ID
+        if len(matches) == 1:
+            return matches[0]["id"]
+            
+        # If multiple, return the list for the caller to handle
+        if len(matches) > 1:
+            return matches
+            
+        # Fallback to the static map or direct ID if no API match found
         for name, task_id in self.TASK_ID_MAP.items():
             if name in task_name_lower or task_name_lower in name:
                 return task_id
-        
-        # If not found, use the task name as ID (might be a direct ID)
+                
         return task_name.replace(" ", "-").lower()

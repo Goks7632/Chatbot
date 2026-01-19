@@ -2,9 +2,10 @@
 Haibot API Service.
 Handles all communication with the Haibot Vercel API endpoints.
 """
-import httpx
-from typing import List, Dict, Optional, Any
 import logging
+import httpx
+import uuid
+from typing import List, Dict, Optional, Any, Union
 
 logger = logging.getLogger(__name__)
 
@@ -232,15 +233,22 @@ class HaibotApiService:
     
     # ==================== Task Templates ====================
     
-    def get_all_tasks(self) -> List[Dict[str, Any]]:
+    def get_all_tasks(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         Get all available task templates.
+        
+        Args:
+            user_id: Optional user ID for filtering tasks
         
         Returns:
             List of task objects
         """
         try:
-            response = self.client.get("/tasks")
+            params = {}
+            if user_id:
+                params["user_id"] = user_id
+            
+            response = self.client.get("/tasks", params=params)
             response.raise_for_status()
             return response.json()
         except httpx.HTTPStatusError as e:

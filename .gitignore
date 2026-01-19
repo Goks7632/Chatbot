@@ -4,6 +4,7 @@ __pycache__/
 *.so
 .Python
 *test_*
+*verify_*
 verify_chatbot_data.py
 env/
 venv/
