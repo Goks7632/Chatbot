@@ -431,8 +431,11 @@ class FunctionExecutor:
             
         return f"Found {len(runs)} runs:\n" + "\n".join(run_list)
     
-    def _get_task_run_status(self, run_id: str) -> str:
+    def _get_task_run_status(self, run_id: str = None, task_name: str = None, identifier: str = None) -> str:
         """Get task run status by ID or Task Name."""
+        # Handle aliases from LLM
+        run_id = run_id or task_name or identifier
+        
         if not run_id:
             return "Please provide a run ID or task name."
             
