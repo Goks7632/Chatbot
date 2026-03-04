@@ -13,7 +13,7 @@ class GroqService:
         messages: List[Dict[str, str]],
         model: str = "openai/gpt-oss-120b",
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int = 4096,
         stream: bool = False,
         tools: Optional[List[Dict[str, Any]]] = None,
         tool_choice: str = "auto"
@@ -51,9 +51,9 @@ class GroqService:
         self,
         messages: List[Dict[str, str]],
         functions: List[Dict[str, Any]],
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "openai/gpt-oss-120b",
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 4096
     ):
         """
         Generate a chat completion with function calling enabled.
@@ -91,9 +91,9 @@ class GroqService:
     def stream_chat_completion(
         self,
         messages: List[Dict[str, str]],
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "openai/gpt-oss-120b",
         temperature: float = 0.7,
-        max_tokens: int = 1024
+        max_tokens: int = 4096
     ):
         for chunk in self.generate_chat_completion(
             messages=messages,

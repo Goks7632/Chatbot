@@ -5,7 +5,7 @@ from datetime import datetime
 
 class MessageCreate(BaseModel):
     content: str
-    model: Optional[str] = "llama-3.3-70b-versatile"
+    model: Optional[str] = "openai/gpt-oss-120b"
     temperature: Optional[float] = 0.7
 
 

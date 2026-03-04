@@ -168,7 +168,7 @@ class ChatService:
         self,
         conversation_id: str,
         user_message: str,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "openai/gpt-oss-120b",
         temperature: float = 0.7,
         enable_functions: bool = True
     ) -> str:
@@ -287,7 +287,7 @@ class ChatService:
         self,
         conversation_id: str,
         user_message: str,
-        model: str = "llama-3.3-70b-versatile",
+        model: str = "openai/gpt-oss-120b",
         temperature: float = 0.7
     ):
         """Stream response (without function calling for now)."""
